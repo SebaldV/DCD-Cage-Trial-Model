@@ -1,0 +1,211 @@
+# Supplemental: Mathematical Modelling Methods
+
+## Model Overview
+
+We used a discrete-generation, frequency-based population genetics model to simulate gene drive dynamics in cage trial populations. The model tracks diploid genotype frequencies across multiple loci, incorporating CRISPR-based homing, fitness costs, and stochastic drift. The core framework has been described previously (Verkuijl et al., PLOS Genetics) and is summarised here with modifications specific to this study. The full implementation is provided in `Model/Model Code.R`.
+
+## Genetic Architecture
+
+The daisy chain drive (DCD) system was modelled with three loci:
+
+- **Locus A** (top element): carries a gRNA, with resistance alleles r1 (functional) and r2 (non-functional)
+- **Locus B**: (middle element): carries Cas9, with resistance alleles r1 (functional) and r2 (non-functional) 
+- **Locus C** (bottom element): carries a second gRNA, inherited in a Mendelian fashion
+
+For the split drive comparison, locus A carries the gRNA and locus B carries Cas9. The global (standard) drive carries a single self-propagating drive element at locus A.
+
+## Parameter Derivation
+
+Model parameters were fit to the cage trial data, with prioritisation given to using as few free parameters as possible rather than achieving an exact fit. Homing rates were matched to experimental observations. 
+
+```{r param-derivation-table, results='asis'}
+`%||%` <- function(a, b) if (is.null(a) || (length(a) == 1 && is.na(a))) b else a
+
+fmt <- function(x) {
+  if (is.null(x) || length(x) == 0 || is.na(x)) return("N/A")
+  num <- suppressWarnings(as.numeric(x))
+  if (is.na(num)) return(as.character(x))
+  if (num == round(num) && abs(num) < 1e6) format(num)
+  else formatC(num, digits = 4, format = "g")
+}
+
+compact <- function(values) {
+  uniq <- unique(values)
+  if (length(uniq) == 1) return(uniq[1])
+  applicable <- values[values != "N/A"]
+  uniq_app <- unique(applicable)
+  if (length(uniq_app) == 1 && any(values == "N/A")) {
+    return(paste0(uniq_app[1], " / N/A"))
+  }
+  paste(values, collapse = " / ")
+}
+
+locus_param <- function(scn_alleles, locus, param) {
+  pl <- scn_alleles$per_locus[[locus]]
+  if (is.null(pl) || is.null(pl[[param]])) NA_character_ else pl[[param]]
+}
+
+active_phenotypes <- function(scn_alleles) {
+  pa <- scn_alleles$per_allele
+  out <- list()
+  for (i in 1:10) {
+    cost_col <- paste0("Homo_Phenotype", i, "_Homozygous_Fitness")
+    male_col <- paste0("Homo_Phenotype", i, "_Male")
+    if (!(cost_col %in% names(pa))) next
+    cost <- suppressWarnings(as.numeric(pa[[cost_col]][1]))
+    if (is.na(cost) || isTRUE(cost == 1)) next
+    # The locus this phenotype acts on is the one with BOTH rescue (Male=TRUE)
+    # alleles and non-rescue (Male=FALSE) alleles present in this scenario.
+    male_flag <- toupper(as.character(pa[[male_col]]))
+    by_locus_flag <- split(male_flag, pa$Locus)
+    target_loci <- names(by_locus_flag)[
+      vapply(by_locus_flag, function(f) any(f == "TRUE") && any(f == "FALSE"),
+             logical(1))
+    ]
+    if (length(target_loci) == 0) next
+    locus <- target_loci[1]
+    cost_alleles <- unique(pa$Allele[pa$Locus == locus & male_flag == "FALSE"])
+    out[[length(out) + 1]] <- list(
+      index = i, cost = cost, locus = locus,
+      alleles = paste(cost_alleles, collapse = "/")
+    )
+  }
+  out
+}
+
+alleles_by_scn <- lapply(scenarios, read_alleles_patched)
+nuc_by_scn     <- lapply(scenarios, read_kv_patched,
+                         file_short   = "Nuc.csv",
+                         default_file = resolve_default("Default_Nuc.csv"))
+
+rows <- list()
+add <- function(parameter, value) {
+  rows[[length(rows) + 1]] <<- data.frame(
+    Parameter = parameter, Value = value,
+    stringsAsFactors = FALSE
+  )
+}
+
+add("Germline cut rate, male",
+    compact(vapply(nuc_by_scn, function(n) fmt(n[["Germline_Cutrate_Male"]]),   character(1))))
+add("Germline cut rate, female",
+    compact(vapply(nuc_by_scn, function(n) fmt(n[["Germline_Cutrate_Female"]]), character(1))))
+add("Germline HDR, male (before penalty)",
+    compact(vapply(nuc_by_scn, function(n) fmt(n[["Germline_HDR_Male"]]),       character(1))))
+add("Germline HDR, female (before penalty)",
+    compact(vapply(nuc_by_scn, function(n) fmt(n[["Germline_HDR_Female"]]),     character(1))))
+
+# Per-locus HDR penalty and NHEJ fraction. Locus C never homes (bottom-element
+# gRNA inherited Mendelianly) so those parameters are not meaningful at C.
+homing_loci <- setdiff(sort(unique(unlist(lapply(alleles_by_scn, `[[`, "loci")))), "C")
+for (L in homing_loci) {
+  vals <- vapply(alleles_by_scn,
+                 function(a) fmt(locus_param(a, L, "HDR_Penalty_Locus")),
+                 character(1))
+  add(paste0("HDR penalty, locus ", L), compact(vals))
+}
+for (L in homing_loci) {
+  vals <- vapply(alleles_by_scn,
+                 function(a) fmt(locus_param(a, L, "nonFunctional_NHEJ_Fraction_Locus")),
+                 character(1))
+  add(paste0("Non-functional NHEJ fraction, locus ", L), compact(vals))
+}
+
+carrier_vals <- vapply(alleles_by_scn, function(a) {
+  vals <- unlist(lapply(a$per_locus, function(pl) {
+    c(pl$Carrier_Fitness_Males, pl$Carrier_Fitness_Females)
+  }))
+  vals <- suppressWarnings(as.numeric(vals))
+  vals <- vals[!is.na(vals)]
+  if (length(vals) == 0) "—"
+  else if (length(unique(vals)) == 1) fmt(vals[1])
+  else paste(format(range(vals)), collapse = "–")
+}, character(1))
+add("Carrier fitness (all genotypes)", compact(carrier_vals))
+
+# Build one row per phenotype index, aligning scenarios that share the same
+# phenotype index (so the same biological cost is in the same row even when
+# a scenario lacks it — e.g. AC has no locus-B cost).
+phenos_by_scn <- lapply(alleles_by_scn, active_phenotypes)
+all_idx <- sort(unique(unlist(lapply(phenos_by_scn, function(p) {
+  vapply(p, function(x) x$index, integer(1))
+}))))
+if (length(all_idx) == 0) {
+  add("Homozygous fitness cost", "None applied (all phenotypes = 1)")
+} else {
+  pick <- function(p, idx) {
+    hit <- Filter(function(x) x$index == idx, p)
+    if (length(hit) == 0) NULL else hit[[1]]
+  }
+  for (idx in all_idx) {
+    entries <- lapply(phenos_by_scn, pick, idx = idx)
+    cost_str <- vapply(entries, function(e) if (is.null(e)) "N/A" else fmt(e$cost),
+                       character(1))
+    # Cost-bearing alleles by locus: same locus across scenarios where active.
+    loci    <- unique(vapply(Filter(Negate(is.null), entries), `[[`, character(1), "locus"))
+    alleles <- unique(unlist(lapply(Filter(Negate(is.null), entries), `[[`, "alleles")))
+    locus_lbl <- if (length(loci) == 1) loci else paste(loci, collapse = "/")
+    allele_lbl <- if (length(alleles) >= 1) paste(alleles, collapse = ", ") else ""
+    label <- paste0("Homozygous fitness, locus ", locus_lbl,
+                    if (nzchar(allele_lbl)) paste0(" (cost on ", allele_lbl, ")") else "")
+    add(label, compact(cost_str))
+  }
+}
+
+dep_m <- vapply(nuc_by_scn, function(n) fmt(n[["Deposition_Cutrate_From_Male_Parent"]]),   character(1))
+dep_f <- vapply(nuc_by_scn, function(n) fmt(n[["Deposition_Cutrate_From_Female_Parent"]]), character(1))
+dep_combined <- vapply(seq_along(dep_m), function(i) {
+  if (identical(dep_m[i], dep_f[i])) dep_m[i] else paste0(dep_m[i], " / ", dep_f[i])
+}, character(1))
+add("Deposition cut rate (paternal/maternal)",
+    if (all(dep_combined == "0")) "None" else compact(dep_combined))
+
+tbl <- do.call(rbind, rows)
+knitr::kable(tbl, row.names = FALSE, align = "ll",
+             caption = paste0("Cage trial model parameters, resolved from the ",
+                              "parameter files. Values shown as `x / y / z` ",
+                              "differ across DCD 15% / DCD 40% / AC 100%; ",
+                              "`N/A` marks parameters that do not apply to a ",
+                              "scenario (e.g. costs at loci absent from that ",
+                              "scenario's construct), and where the applicable ",
+                              "scenarios share a single value it is shown ",
+                              "collapsed as `value / N/A`."))
+```
+
+Parameters held constant across release scenarios are shown as a single value; values that differ between scenarios are shown as `DCD 15% / DCD 40% / AC 100%`. Parameters that do not apply to a scenario (e.g. a locus that is absent from that scenario's construct) are shown as `N/A`; when the applicable scenarios share a single value the row is collapsed to `value / N/A`.
+
+## Simulation Setup
+
+Three cage trial scenarios were simulated, matching the experimental release ratios:
+
+| Scenario | Release type | Release fraction (M/F) | Population size |
+|----------|-------------|----------------------|-----------------|
+| DCD 15% | Heterozygous (all drive loci) | 0.15 / 0.15 | 200 |
+| DCD 40% | Heterozygous (all drive loci) | 0.40 / 0.40 | 200 |
+| AC 100% | Heterozygous (all drive loci) | 1.00 / 1.00 | 200 |
+
+Each scenario was run for 20 discrete, non-overlapping generations; Figure 2 shows the first 10, the generations spanned by the cage trial measurements. One deterministic simulation (infinite population) and 50 stochastic replicates were performed per scenario. Stochastic replicates used multinomial sampling at each generation to simulate genetic drift at the specified population size (N = 200).
+
+## Resistance alleles
+
+No standing (pre-existing) r1 resistance was seeded in any scenario: every population begins free of functional resistance, and each scenario's `Release.csv` supplies a single drive release. All r1 alleles appearing in the simulations are therefore generated de novo during drive conversion, as the functional fraction of non-homologous end-joining repair (a non-functional NHEJ fraction of 0.667 at loci A and B, i.e. one third of end-joining events yield a functional r1 allele; see Table 1). The model was fitted to the transgene carrier-frequency data only, which is all the cage trial measured — no r1 frequencies were used as fitting targets.
+
+## Confinement Comparison
+
+To illustrate how the DCD is self-limiting relative to a standard global homing drive, we simulated a chain of three connected populations linked by back-and-forth migration (1% per generation), all advanced simultaneously. A split drive was included as a second, more stringently limited point of comparison: across the three architectures the DCD is intermediate, spreading further than the split drive but, unlike the global drive, still declining to low frequency everywhere in the chain rather than fixing. Following the connected-population approach of Verkuijl et al. (2022), the three populations are arranged in a chain, Population 1 $\leftrightarrow$ Population 2 $\leftrightarrow$ Population 3, with the far end (Population 3) additionally exchanging migrants with the surrounding wild-type general population. Population 1 received a 50% heterozygous drive release at generation 1 (high release fraction chosen to ensure rapid establishment in the release population so that downstream behaviour reflects migration dynamics rather than release noise); the other populations received no release. Rather than running each population to completion against a fixed migrant source, all populations are advanced one generation in lockstep and migrants are then exchanged at the gamete stage, so that migration is fully reciprocal. For migration rate $m = 0.01$ and gamete (haploid genotype) frequency vectors $\mathbf{h}$, the exchange is
+
+$$
+\begin{aligned}
+\mathbf{h}_{1,t}' &= (1 - m)\,\mathbf{h}_{1,t} + m\,\mathbf{h}_{2,t} \\
+\mathbf{h}_{2,t}' &= (1 - m)\,\mathbf{h}_{2,t} + \tfrac{m}{2}\,\mathbf{h}_{1,t} + \tfrac{m}{2}\,\mathbf{h}_{3,t} \\
+\mathbf{h}_{3,t}' &= (1 - m)\,\mathbf{h}_{3,t} + \tfrac{m}{2}\,\mathbf{h}_{2,t} + \tfrac{m}{2}\,\mathbf{h}_{\mathrm{WT}}
+\end{aligned}
+$$
+
+where $\mathbf{h}_{\mathrm{WT}}$ is the wild-type gamete pool. Each population therefore receives a total immigrant fraction $m$ per generation, and the interior connections are reciprocal. Three drive architectures were compared: a standard global homing drive (single locus), a split drive (Cas9 and gRNA on separate loci), and the DCD (three-locus daisy chain). The confinement comparison inherits the project-level defaults in `Default_Nuc.csv` and `Default_Alleles.csv`: cut rate and HDR efficiency are set to 1 and the per-locus HDR penalties are 0.95 (locus A) and 0.99 (locus B), giving effective per-generation conversion rates of 95% and 99% respectively. Locus C in the DCD design carries a non-homing bottom-element gRNA and is inherited in a Mendelian fashion.
+
+Two further inherited settings shape these trajectories and are stated here explicitly. First, the same homozygous fitness costs used for the cage trial scenarios apply (Table 1): carrier genotypes are unaffected, while homozygotes for the non-rescuing allele have a relative fitness of 0.5 at locus A, 0.85 at locus B and 0.75 at locus C — that is, fitness costs of 50%, 15% and 25% respectively. These costs, rather than migration alone, are what drive the eventual decline of the split drive and the DCD in the release population. Second, the confinement `Alleles.csv` files override the non-functional NHEJ fraction to 1 at every locus, so all end-joining repair yields non-functional r2 and no functional r1 resistance arises; this isolates the architectural comparison from resistance-allele dynamics, and differs from the cage trial scenarios, where the fraction is 0.667. As in the underlying recursion, genotype frequencies are tracked relative to a fixed population size, so all three populations are of equal effective size and migration does not depend on local density.
+
+## Software and Code Availability
+
+All simulations were performed in R (version 4.5.2, as pinned in `renv.lock`). The model code is provided in `Model/Model Code.R`, with default parameter files at `Model/Default_*.csv` and the publication-specific parameter overrides under `Model/Shared Simulations/Publication/Parameter Files/`. The simulations are launched by `Model/Shared Simulations/Publication/Simulation setup.R`, which writes per-scenario outputs into `Model/Shared Simulations/Publication/Outcomes/`. `Analysis.Rmd` knits the figures and `Simulation_Scenarios.xlsx` directly from those outputs.

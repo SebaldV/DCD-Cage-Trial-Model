@@ -1,0 +1,4 @@
+Run_Fig,Fig_group,Fig_name,Project_Folder,Allele_Fit_File,Nuc_File,Release_File,Figure_type,Factor_F1,Range_Type_F1,Start_F1,Stop_F1,Steps_F1,Exponent_F1,Factor_F2,Range_Type_F2,Start_F2,Stop_F2,Steps_F2,Exponent_F2
+TRUE,Neutral,DCD 15 Fitted r1_.1,DCD 15 Fitted r1_.1,Alleles,Nuc,Release,Range,no-change,Lin,1,1,1,1,none,none,NA,NA,1,NA
+TRUE,Neutral,DCD 40 Fitted r1_.1,DCD 40 Fitted r1_.1,Alleles,Nuc,Release,Range,no-change,Lin,1,1,1,1,none,none,NA,NA,1,NA
+TRUE,Neutral,AC 100 Fitted r1_.1,AC 100 Fitted r1_.1,Alleles,Nuc,Release,Range,no-change,Lin,1,1,1,1,none,none,NA,NA,1,NA

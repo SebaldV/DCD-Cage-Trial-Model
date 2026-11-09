@@ -1,0 +1,491 @@
+---
+title: "DCD Cage Trial — Modelling Figures (Publication Package)"
+output:
+  pdf_document:
+    toc: true
+date: ""
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+library(readr)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+library(ggh4x)
+library(cowplot)
+library(ggtext)
+library(svglite)
+library(showtext)
+library(writexl)
+
+showtext_opts(dpi = 1200)
+showtext_auto()
+
+# Max figure dimensions (183mm page width)
+figure_width <- 183 / 25.4
+figure_height <- figure_width * 1.35
+
+# Default text size
+ggplot2::update_geom_defaults("text", list(size = (7 / .pt)))
+showtext::showtext_auto(enable = FALSE)
+
+# Figure export helper
+if (!dir.exists("Figures")) dir.create("Figures")
+fig_export <- function(figure, name, width, height) {
+  figure
+  ggplot2::ggsave(str_c("Figures/", name, ".svg"), width = width, height = height, dpi = 1200)
+}
+
+# Simulation outputs (written by `Simulation setup.R` into the Model folder).
+# Figures and the per-scenario Excel summary are drawn directly from here.
+outcomes_root <- "Model/Shared Simulations/Publication/Outcomes"
+
+# Parameter files root (drives the dynamic Methods tables AND supplies the
+# experimental cage trial measurements consumed alongside each simulation).
+param_root  <- "Model/Shared Simulations/Publication/Parameter Files"
+model_root  <- "Model"
+
+# Cage trial scenarios (label -> folder name under Outcomes/ and Parameter Files/)
+scenarios <- c(
+  "DCD 15%"  = "DCD 15 Fitted r1_.1",
+  "DCD 40%"  = "DCD 40 Fitted r1_.1",
+  "AC 100%"  = "AC 100 Fitted r1_.1"
+)
+
+# Confinement scenarios (drive folder -> displayed drive label)
+confinement_drives <- c(
+  "Standard_Drive" = "Global drive",
+  "Split_Drive"    = "Split drive",
+  "DCD"            = "Daisy chain drive (DCD)"
+)
+confinement_pops <- c(
+  "Pop1" = "Release population",
+  "Pop2" = "Population 2 (middle)",
+  "Pop3" = "Population 3 (far end)"
+)
+```
+
+## Parameter-file readers (drive the dynamic Methods tables)
+
+```{r param-readers}
+# Mirrors Default_Geno / Default_Nuc_Rates resolution: a Default_*.csv inside
+# the project Parameter Files folder (if present) shadows the library default
+# under Model/.
+resolve_default <- function(short_name) {
+  project_default <- file.path(param_root, short_name)
+  if (file.exists(project_default)) project_default
+  else file.path(model_root, short_name)
+}
+
+# Read a two-column key/value CSV, patching missing values with defaults.
+# Used for Nuc.csv and Release.csv (both share the same shape).
+read_kv_patched <- function(scenario_folder, file_short, default_file) {
+  defaults <- read.csv(default_file, header = FALSE,
+                       col.names = c("Parameter", "Default"),
+                       colClasses = "character", stringsAsFactors = FALSE,
+                       na.strings = c("", "NA"))
+
+  override_path <- file.path(param_root, scenario_folder, file_short)
+  if (file.exists(override_path)) {
+    ov <- read.csv(override_path, header = FALSE,
+                   colClasses = "character", stringsAsFactors = FALSE,
+                   na.strings = c("", "NA"))
+    names(ov)[1] <- "Parameter"
+    # Keep first non-NA value column per parameter
+    ov$Value <- apply(ov[, -1, drop = FALSE], 1, function(x) {
+      x <- x[!is.na(x) & x != ""]
+      if (length(x) == 0) NA_character_ else x[1]
+    })
+    ov <- ov[, c("Parameter", "Value")]
+    merged <- merge(defaults, ov, by = "Parameter", all.x = TRUE)
+    merged$Value <- ifelse(is.na(merged$Value), merged$Default, merged$Value)
+    out <- setNames(merged$Value, merged$Parameter)
+  } else {
+    out <- setNames(defaults$Default, defaults$Parameter)
+  }
+  out
+}
+
+# Read Alleles.csv with the same Default_Geno patching logic used by the model:
+# the scenario file supplies Locus/Alleles columns; per-locus parameters fall
+# back to the matching column in Default_Alleles.csv (D allele for non T/r1/r2).
+read_alleles_patched <- function(scenario_folder) {
+  default_file <- resolve_default("Default_Alleles.csv")
+  defaults <- read.csv(default_file, header = FALSE,
+                       colClasses = "character", stringsAsFactors = FALSE,
+                       na.strings = c("", "NA"))
+  names(defaults)[1] <- "Parameter"
+  def_locus  <- as.character(defaults[defaults$Parameter == "Locus",   -1])
+  def_allele <- as.character(defaults[defaults$Parameter == "Alleles", -1])
+
+  override_path <- file.path(param_root, scenario_folder, "Alleles.csv")
+  if (file.exists(override_path)) {
+    ov <- read.csv(override_path, header = FALSE,
+                   colClasses = "character", stringsAsFactors = FALSE,
+                   na.strings = c("", "NA"))
+    names(ov)[1] <- "Parameter"
+    src_locus  <- as.character(ov[ov$Parameter == "Locus",   -1])
+    src_allele <- as.character(ov[ov$Parameter == "Alleles", -1])
+  } else {
+    src_locus  <- def_locus
+    src_allele <- def_allele
+  }
+
+  # For each scenario (locus, allele) column, find the default column to copy
+  # parameter values from: exact match on (locus, allele), else (locus, "D").
+  lookup_idx <- mapply(function(L, A) {
+    hit <- which(def_locus == L & def_allele == A)
+    if (length(hit) == 0 && !A %in% c("T", "r1", "r2")) {
+      hit <- which(def_locus == L & def_allele == "D")
+    }
+    if (length(hit) == 0) NA_integer_ else hit[1]
+  }, src_locus, src_allele, USE.NAMES = FALSE)
+
+  # Build a per-(locus, allele) data frame: one row per scenario column, one
+  # column per parameter. Values come from the matched default column.
+  data_params <- setdiff(defaults$Parameter, c("Locus", "Alleles"))
+  per_allele <- data.frame(Locus = src_locus, Allele = src_allele,
+                           stringsAsFactors = FALSE)
+  for (p in data_params) {
+    row_vals <- as.character(defaults[defaults$Parameter == p, -1])
+    per_allele[[p]] <- ifelse(is.na(lookup_idx), NA_character_,
+                              row_vals[lookup_idx])
+  }
+
+  # Per-locus view: first allele row per locus (per-locus params are uniform
+  # across alleles within a locus by construction in the model).
+  loci <- unique(src_locus)
+  per_locus <- lapply(loci, function(L) {
+    rows <- per_allele[per_allele$Locus == L, , drop = FALSE]
+    if (nrow(rows) == 0) NULL else as.list(rows[1, ])
+  })
+  names(per_locus) <- loci
+  per_locus <- per_locus[!sapply(per_locus, is.null)]
+
+  list(loci = loci,
+       alleles_by_locus = split(src_allele, src_locus),
+       per_locus = per_locus,
+       per_allele = per_allele)
+}
+```
+
+## Helper Functions
+
+```{r helpers}
+# Colorblind-friendly locus palette (Okabe-Ito inspired)
+locus_color <- c("A" = "#009E73", "B" = "#D55E00", "C" = "#0072B2", "General" = "#CC79A7")
+
+outcome_linetype <- c(
+  "D" = "solid",
+  "r1" = "dashed",
+  "r2" = "dotted",
+  "T" = "solid",
+  "Sex_Ratio" = "longdash",
+  "Genetic_Load" = "dotdash"
+)
+
+# Confinement element palette (colorblind-friendly)
+# Split drive: gRNA at locus A, Cas9 at locus B
+# DCD: gRNA at locus A (top element), Cas9 at locus B, gRNA at locus C (bottom
+# element, inherited Mendelianly)
+# One key per distinct element, shared across architectures: the split drive and
+# the DCD both carry a locus-A gRNA, so they use the same legend entry rather
+# than two indistinguishable green keys.
+element_colors <- c(
+  "Drive (locus A)" = "#E69F00",
+  "gRNA (locus A)"  = "#009E73",
+  "Cas9 (locus B)"  = "#D55E00",
+  "gRNA (locus C)"  = "#0072B2"
+)
+
+element_linetypes <- c(
+  "Drive (locus A)" = "solid",
+  "gRNA (locus A)"  = "solid",
+  "Cas9 (locus B)"  = "dashed",
+  "gRNA (locus C)"  = "longdash"
+)
+
+# Read and standardize simulation/experimental CSV data
+read_sim_data <- function(file, type, name) {
+  read_csv(file, col_types = cols(.default = "c")) %>%
+    mutate(across(c(t, Allele_Freq, Carrier_Freq, Het_Freq, Hom_Freq), as.numeric)) %>%
+    filter(!is.na(t), !is.na(Outcome), Outcome != "", !is.na(Locus), !is.na(Replicate)) %>%
+    mutate(
+      Replicate = as.character(Replicate),
+      DataSource = type,
+      Name = name,
+      Original_Outcome = Outcome,
+      Outcome = ifelse(
+        Locus != "General" & !(Outcome %in% c("T", "r1", "r2", "Sex_Ratio", "Genetic_Load")),
+        "D", Outcome
+      )
+    )
+}
+
+# Load a scenario: simulation + experimental data, both read directly from
+# the simulation output folder. `run_simulations()` writes both files there,
+# so no manual copying between repository folders is needed.
+load_scenario <- function(folder, name) {
+  sim_file <- file.path(outcomes_root, folder,
+                        paste0("Outcomes_", folder, "_Alleles.csv"))
+  data <- read_sim_data(sim_file, "Simulation", name)
+  data <- data[, !names(data) %in% c("...1")]
+
+  exp_file <- file.path(outcomes_root, folder,
+                        paste0("Experimental_", folder, "_Alleles.csv"))
+  if (file.exists(exp_file)) {
+    exp_data <- read_sim_data(exp_file, "Experimental", name)
+    exp_data <- exp_data[, !names(exp_data) %in% c("X", "...1")]
+    data <- bind_rows(data, exp_data)
+  }
+
+  data %>% filter(Pre_or_Post_Fit == "Post", Sex == "Male&Female")
+}
+
+# Cage trial overlay plot (stochastic sims + experimental data)
+cage_trial <- function(selected_metric, DataSource, locus_color, outcome_linetype,
+                       Locus_Select, Alleles_Select, Gens) {
+  DataSource <- DataSource %>%
+    filter(Locus %in% Locus_Select, Outcome %in% Alleles_Select) %>%
+    mutate(PlotGroup = interaction(Locus, Outcome, Sex, Pre_or_Post_Fit, Replicate, DataSource))
+
+  stochastic_data <- DataSource %>% filter(DataSource == "Simulation", Replicate != "0")
+  experimental_data <- DataSource %>% filter(DataSource == "Experimental")
+
+  p <- ggplot()
+
+  if (nrow(stochastic_data) > 0) {
+    p <- p + geom_line(
+      data = stochastic_data,
+      aes(x = t, y = .data[[selected_metric]], group = PlotGroup, color = Locus, linetype = Outcome),
+      alpha = 0.1, size = 0.4
+    )
+  }
+
+  if (nrow(experimental_data) > 0) {
+    p <- p +
+      geom_line(data = experimental_data,
+                aes(x = t, y = .data[[selected_metric]], group = PlotGroup),
+                colour = "black", size = 0.5, alpha = 0.5) +
+      geom_line(data = experimental_data,
+                aes(x = t, y = .data[[selected_metric]], group = PlotGroup,
+                    colour = Locus, linetype = Outcome),
+                size = 0.3, alpha = 1) +
+      geom_point(data = experimental_data,
+                 aes(x = t, y = .data[[selected_metric]], group = PlotGroup, shape = Replicate),
+                 colour = "black", size = 1.9) +
+      geom_point(data = experimental_data,
+                 aes(x = t, y = .data[[selected_metric]], group = PlotGroup,
+                     colour = Locus, shape = Replicate),
+                 size = 1.5)
+  }
+
+  metric_names <- c(
+    "Allele_Freq" = "Allele Frequency",
+    "Carrier_Freq" = "Carrier Frequency",
+    "Het_Freq" = "Heterozygous Frequency",
+    "Hom_Freq" = "Homozygous Frequency"
+  )
+
+  p + scale_color_manual(values = locus_color, name = "Locus") +
+    scale_linetype_manual(values = outcome_linetype, name = "Allele") +
+    labs(x = "Generation", y = metric_names[selected_metric]) +
+    scale_x_continuous(breaks = seq(0, 100, 1)) +
+    coord_cartesian(ylim = c(0, 1), xlim = c(min(DataSource$t), Gens)) +
+    facet_grid(cols = vars(Name)) +
+    theme_classic(base_size = 8) +
+    theme(
+      text = element_text(size = 8),
+      strip.text = element_text(size = 8, face = "bold"),
+      strip.background = element_rect(fill = "grey95", colour = NA),
+      axis.line = element_line(linewidth = 0.3),
+      axis.ticks = element_line(linewidth = 0.3),
+      panel.spacing = unit(0.8, "lines"),
+      legend.position = "bottom",
+      legend.box = "vertical",
+      legend.margin = margin(0, 0, 0, 0, "pt"),
+      legend.text = element_text(size = 7),
+      legend.key.width = unit(1, "cm"),
+      legend.key.height = unit(0.3, "cm")
+    ) +
+    guides(color = guide_legend(order = 1, nrow = 1),
+           linetype = guide_legend(order = 2, nrow = 1))
+}
+
+# Publication aesthetics (strips the legend; axis titles are retained so each
+# exported panel is self-describing).
+common_aes <- function(plot_object) {
+  plot_object +
+    theme(legend.position = "none")
+}
+```
+
+## Figure 1: Confinement Comparison
+
+```{r confinement, fig.width=7, fig.height=5.5, dpi=1200}
+drives <- names(confinement_drives)
+pops   <- names(confinement_pops)
+
+conf_data <- list()
+for (d in drives) {
+  for (pop in pops) {
+    sim <- paste0(d, "_", pop)
+    f <- file.path(outcomes_root, sim, paste0("Outcomes_", sim, "_Alleles.csv"))
+    df <- read.csv(f) %>%
+      filter(Pre_or_Post_Fit == "Post", Sex == "Male&Female",
+             Locus != "General", !(Outcome %in% c("T", "r1", "r2"))) %>%
+      mutate(
+        Drive = d,
+        Population = pop,
+        Pop_Label = confinement_pops[pop],
+        Chain_Element = case_when(
+          Drive == "Standard_Drive" ~ "Drive (locus A)",
+          Locus == "A" ~ "gRNA (locus A)",
+          Locus == "B" ~ "Cas9 (locus B)",
+          Locus == "C" ~ "gRNA (locus C)",
+          TRUE ~ Outcome
+        )
+      )
+    conf_data[[length(conf_data) + 1]] <- df
+  }
+}
+conf_all <- bind_rows(conf_data)
+
+conf_all$Drive_Label <- factor(confinement_drives[conf_all$Drive],
+                               levels = confinement_drives)
+conf_all$Pop_Label <- factor(conf_all$Pop_Label, levels = confinement_pops)
+conf_all$Chain_Element <- factor(conf_all$Chain_Element,
+                                 levels = names(element_colors))
+
+Fig_confinement <- ggplot(conf_all,
+       aes(x = t, y = Carrier_Freq, color = Chain_Element, linetype = Chain_Element)) +
+  geom_line(linewidth = 0.7) +
+  facet_grid(rows = vars(Drive_Label), cols = vars(Pop_Label)) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
+  scale_x_continuous(breaks = seq(0, 70, 10)) +
+  scale_color_manual(values = element_colors, name = NULL) +
+  scale_linetype_manual(values = element_linetypes, name = NULL) +
+  labs(x = "Generation", y = "Carrier frequency") +
+  theme_classic(base_size = 8) +
+  theme(
+    strip.text = element_text(size = 7.5, face = "bold"),
+    strip.background = element_rect(fill = "grey95", colour = NA),
+    axis.line = element_line(linewidth = 0.3),
+    axis.ticks = element_line(linewidth = 0.3),
+    panel.spacing = unit(0.6, "lines"),
+    legend.position = "bottom",
+    legend.key.width = unit(1, "cm"),
+    legend.key.height = unit(0.3, "cm"),
+    legend.text = element_text(size = 7),
+    legend.spacing.x = unit(0.3, "cm")
+  ) +
+  guides(color = guide_legend(nrow = 1), linetype = guide_legend(nrow = 1))
+
+Fig_confinement
+
+fig_export(Fig_confinement, "Confinement", width = figure_width, height = figure_width * 0.8)
+```
+
+**Figure 1. Drive architecture and spatial confinement.** Simulated carrier frequencies over 70 generations for three gene drive architectures (rows: global drive, split drive, daisy chain drive) seeded into a three-population chain connected by 1% back-and-forth migration each generation (columns: release population, middle population, far-end population). The populations are linked in series (Pop 1 $\leftrightarrow$ Pop 2 $\leftrightarrow$ Pop 3), and the far end (Pop 3) is additionally supplemented with wild-type migrants from the surrounding general population; all populations are simulated simultaneously, with migrants exchanged at the gamete stage every generation. Drive elements are shown with distinct colour and linetype, with one legend key per element shared across architectures: the global drive carries a single Drive element at locus A (orange, solid); the split drive carries a gRNA at locus A (green, solid) and a Cas9 at locus B (red, dashed); and the daisy chain drive (DCD) carries a gRNA at locus A (green, solid), a Cas9 at locus B (red, dashed), and a second gRNA at locus C (blue, long-dash). All architectures were initialised with a 50% heterozygous release into the release population (Pop 1) at generation 1; the other populations received only migrants.
+
+## Figure 2: Cage Trial Overlays
+
+```{r fitted, fig.width=7, fig.height=3.5, dpi=1200}
+fit_data <- bind_rows(lapply(names(scenarios), function(label) {
+  load_scenario(scenarios[[label]], label)
+}))
+fit_data$Name <- factor(fit_data$Name, levels = c("DCD 15%", "DCD 40%", "AC 100%"))
+
+# r1 is only meaningful at the gRNA target locus A here; drop r1 rows at other
+# loci so the dashed-line overlay reads as "A r1" without B/C clutter.
+fit_data_plot <- fit_data %>%
+  filter(!(Outcome == "r1" & Locus != "A"))
+
+Fig_fitted <- cage_trial(
+  selected_metric = "Carrier_Freq",
+  DataSource = fit_data_plot,
+  outcome_linetype = outcome_linetype,
+  locus_color = locus_color,
+  Locus_Select = c("A", "B", "C"),
+  Alleles_Select = c("D", "r1"),
+  Gens = 10
+)
+
+Fig_fitted <- common_aes(Fig_fitted)
+Fig_fitted
+
+fig_export(Fig_fitted, "Fitted_r1_Overlay", width = figure_width, height = figure_width * 0.45)
+```
+
+**Figure 2. Fitted simulations versus cage trial data.** Stochastic simulations (50 replicates per scenario, light coloured lines, *N* = 200) of carrier frequency at the top element gRNA locus (locus A, green), the Cas9 locus (locus B, red) and the bottom element gRNA locus (locus C, blue) for three release scenarios (panels left → right: DCD 15%, DCD 40%, AC 100%). The drive allele (D) is drawn with solid lines; the locus A r1 resistance allele is overlaid as a dashed green line. No standing r1 was seeded — each population begins free of pre-existing resistance, so the dashed line reflects only r1 alleles generated de novo through non-homologous end-joining during drive conversion. Simulations were fitted to the transgene carrier-frequency data only. Cage trial experimental measurements are overlaid as connected points (one shape per biological replicate). Generations on the x-axis are discrete and non-overlapping.
+
+## Simulation Scenarios Workbook
+
+`Simulation_Scenarios.xlsx` accompanies the figures as a self-documenting summary
+of every per-replicate trajectory feeding them. It is written here so that the
+data underlying the figures and the workbook can never drift out of sync.
+
+```{r excel-export, include=FALSE}
+# One sheet per scenario in this order: the three cage trial scenarios first,
+# then the nine confinement runs (three drives x three chained populations).
+sheet_folders <- c(unname(scenarios),
+                   paste0(rep(names(confinement_drives), each = length(confinement_pops)),
+                          "_", rep(names(confinement_pops), times = length(confinement_drives))))
+
+build_scenario_sheet <- function(folder) {
+  csv_path <- file.path(outcomes_root, folder, paste0("Outcomes_", folder, "_Alleles.csv"))
+  if (!file.exists(csv_path)) return(NULL)
+
+  long <- read_csv(csv_path, col_types = cols(.default = "c")) %>%
+    filter(!is.na(t), !is.na(Outcome), Outcome != "",
+           !is.na(Locus), !is.na(Replicate),
+           Pre_or_Post_Fit == "Post",
+           Sex == "Male&Female",
+           Locus != "General") %>%
+    mutate(Outcome = ifelse(
+      !(Outcome %in% c("T", "r1", "r2", "Sex_Ratio", "Genetic_Load")),
+      "D", Outcome
+    )) %>%
+    filter(Outcome == "D" | (Outcome == "r1" & Locus %in% c("A", "B"))) %>%
+    mutate(Replicate = paste0("rep", Replicate),
+           ColName   = paste("Simulation", Locus, Outcome, Replicate, sep = "|"))
+
+  wide <- long %>%
+    select(t, ColName, Carrier_Freq) %>%
+    pivot_wider(names_from = ColName, values_from = Carrier_Freq) %>%
+    mutate(t = as.integer(t)) %>%
+    arrange(t)
+
+  data_cols <- setdiff(names(wide), "t")
+  parts <- strsplit(data_cols, "|", fixed = TRUE)
+  ord <- order(
+    vapply(parts, `[`, character(1), 2),
+    vapply(parts, `[`, character(1), 3),
+    as.integer(sub("rep", "", vapply(parts, `[`, character(1), 4)))
+  )
+  wide <- wide[, c("t", data_cols[ord])]
+
+  meta_parts <- strsplit(names(wide)[-1], "|", fixed = TRUE)
+  meta <- tibble::tibble(t = c("DataSource", "Locus", "Outcome", "Replicate"))
+  for (i in seq_along(meta_parts)) {
+    meta[[names(wide)[-1][i]]] <- meta_parts[[i]]
+  }
+
+  bind_rows(meta, wide %>% mutate(across(everything(), as.character)))
+}
+
+scenario_sheets <- setNames(lapply(sheet_folders, build_scenario_sheet), sheet_folders)
+scenario_sheets <- scenario_sheets[!vapply(scenario_sheets, is.null, logical(1))]
+
+writexl::write_xlsx(scenario_sheets, "Simulation_Scenarios.xlsx")
+
+message("Wrote ", length(scenario_sheets), " sheets to Simulation_Scenarios.xlsx:\n",
+        paste(" -", names(scenario_sheets), collapse = "\n"))
+```
+
+```{r methods-child, child = 'Methods.Rmd'}
+```
+

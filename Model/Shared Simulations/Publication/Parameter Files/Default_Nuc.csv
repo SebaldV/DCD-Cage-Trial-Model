@@ -1,0 +1,12 @@
+Germline_Cutrate_Male,1
+Germline_Cutrate_Female,1
+Germline_HDR_Male,1
+Germline_HDR_Female,1
+Deposition_Cutrate_From_Male_Parent,0
+Deposition_Cutrate_From_Female_Parent,0
+Deposition_HDR,0
+gRNA_Deposition,TRUE
+Shadow_Drive_Cas9_Deposition_Only,TRUE
+Homozygous_Wildtype_No_HDR,TRUE
+Somatic_Cutrate_Male,0
+Somatic_Cutrate_Female,0

@@ -1,0 +1,13 @@
+Simulation_Length,20
+Adult_Pop_Size,100
+Replicate_Simulations,50
+Score_Seperate_From_Seed,TRUE
+Sex_Mached,FALSE
+Generation,1
+Release_Type,Hom_Comb
+Male_Release_Fraction,0.15
+Female_Release_Fraction,0.15
+Release_Pop_Effective_Size,100
+Release_PreorPost_Fitness_Costs,Post
+Migration_Rate,0
+Migration_Source,none

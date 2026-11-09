@@ -1,0 +1,2 @@
+"","Simulation_Length","Adult_Pop_Size","Replicate_Simulations","Release_Pop_Effective_Size","Score_Seperate_From_Seed","Sex_Mached","Generation","Release_Type","Male_Release_Fraction","Female_Release_Fraction","Release_PreorPost_Fitness_Costs","Migration_Rate","Migration_Source"
+"1",20,200,50,200,TRUE,FALSE,1,"Het_Comb",1,1,"Post",0,"none"

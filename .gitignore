@@ -1,0 +1,33 @@
+# macOS
+.DS_Store
+
+# R / RStudio
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+*.Rproj
+render.log
+Analysis.knit.md
+Analysis.utf8.md
+
+# renv: keep lockfile and activator, ignore everything else
+renv/library/
+renv/local/
+renv/cellar/
+renv/lock/
+renv/python/
+renv/staging/
+renv/sandbox/
+
+# Simulation run artefacts (the figure pipeline regenerates these)
+Model/Shared Simulations/Publication/sim_run.log
+
+# Claude Code local config
+.claude/
+
+# Knit log artefact (regenerated on each render)
+Analysis.log
+
+# Office lock files (e.g. ~$manuscript.docx)
+~$*
